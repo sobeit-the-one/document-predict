@@ -1,0 +1,12 @@
+[submodule "llama.cpp"]
+	path = llama.cpp
+	url = https://github.com/ggerganov/llama.cpp.git
+[submodule "argparse"]
+	path = argparse
+	url = https://github.com/p-ranav/argparse.git
+[submodule "Jinja2Cpp"]
+	path = Jinja2Cpp
+	url = https://github.com/jinja2cpp/Jinja2Cpp.git
+[submodule "minja"]
+	path = minja
+	url = https://github.com/google/minja.git
