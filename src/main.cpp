@@ -25,6 +25,10 @@ int main(int argc, char** argv) {
     program.add_argument("--jinja")
         .flag()
         .help("Enable Jinja2 template processing (treat input file as template)");
+    
+    program.add_argument("--var")
+        .append()
+        .help("Template variable in format key=value (can be used multiple times, only used with --jinja)");
 
     // Generation parameters
     program.add_argument("-n", "--max-tokens")
@@ -103,8 +107,22 @@ int main(int argc, char** argv) {
         // Treat input file as Jinja2 template and render it
         std::vector<PromptVariable> variables;
         variables.push_back({"file_path", file_path});
-        // Note: file_content would be the template source itself, which is usually not useful
-        // Users can add custom variables via template if needed
+        
+        // Parse template variables from command line (--var key=value)
+        if (program.is_used("--var")) {
+            auto var_args = program.get<std::vector<std::string>>("--var");
+            for (const auto& var_arg : var_args) {
+                size_t eq_pos = var_arg.find('=');
+                if (eq_pos == std::string::npos || eq_pos == 0) {
+                    std::cerr << "Error: Invalid template variable format: " << var_arg << std::endl;
+                    std::cerr << "Expected format: key=value" << std::endl;
+                    return 1;
+                }
+                std::string key = var_arg.substr(0, eq_pos);
+                std::string value = var_arg.substr(eq_pos + 1);
+                variables.push_back({key, value});
+            }
+        }
         
         PromptFile prompt_file(file_path);
         auto prompt_result = prompt_file.load_prompt(variables);
