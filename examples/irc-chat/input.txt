@@ -1,0 +1,102 @@
+```
+2021-09-01 06:01:23 <ncopa> i can approve it, but i dont know how to review it or what to look for :)
+2021-09-01 14:07:30 <tomalok> ncopa PRs for new releases for existing versions usually just upates the releases YAML and releases README with the new AMI ids...  unless some other tweak's being done (switching to doas instead sudo on edge like last time)
+2021-09-01 14:11:07 <minimal> tomalok: Hi. Will be updating Alpine cloud-init to latest release earlier today - this is the first cloud-init version to support network hotplug (for Ec2)
+2021-09-01 14:11:17 <minimal> s/earlier/later/
+2021-09-01 14:14:28 <tomalok> minimal looking forward to adding that dimensional variant to the multi cloud builder that's in PoC
+2021-09-01 14:15:46 <tomalok> is it mdev (like the tiny bootstrap), or is it (some flavor) of udev?
+2021-09-01 14:16:34 <tomalok> ncopa: i read your approval as permission to merge...  ;)  ikke: we'll see if the new trigger rebuilds the cloud page
+2021-09-01 14:16:45 <ikke> (y)
+2021-09-01 14:28:56 <minimal> tomalok: udev hook, cloud-init (upstream) only support udev. I thought about writing changes for supporting mdev a while ago but I'm not sure upstream would accept them in which case I'd be left maintaining them for each upstream release
+2021-09-01 15:33:20 <tomalok> ikke - looks like cloud page hasn't updated automagically
+2021-09-01 15:33:54 <ikke> Hmm, ok :(
+2021-09-02 15:38:58 <tomalok> minimal: does cloud-init also support IPv6 & secondary IPv4? i think the other thing that tiny-ec2-bootstrap does is add aliases for /dev/xvdX for the NVMe devices 
+2021-09-02 15:39:36 <tomalok> (hotplug add/remove volumes)
+2021-09-02 15:42:40 <minimal> tomalok: the new network hotplug functionality in cloud-init is that when a new network interface is added to VM then udev will trigger a cloud-init supplied script which notifies cloud-init and then, for the Ec2 DataSource I believe it will re-read the network config from the AWS Metadata Server to get the IP settings
+2021-09-02 15:44:59 <tomalok> i would suspect it's similar to the scripts that are in alpine-ec2-ami (but probably really belong in tiny-ec2-bootstrap)
+2021-09-02 15:45:50 <minimal> for hotplug of volumes (and the naming of those devices) that's down appropriate udev rules - not sure it the eudev package sets up nvme-naming currently, let me check
+2021-09-02 15:46:37 <tomalok> there's also a DHCP trigger script that re-checks when the lease is refreshed (adding/removing IP[6]s from the NIC doesn't re-trigger hotplug events)
+2021-09-02 15:48:43 <minimal> tomalok: well conceptually I'd say a change in DHCP allocated IP isn't really a "hotplug" - a change from "static" to "dhcp" (for example) would be
+2021-09-02 15:53:43 <minimal> tomalok: sorry, misread your IM about disks - so the question is whether /dev/xvd? entries are created to point to /dev/nvme?n?p? entries? udev/eudev doesn't do that out of the box but would not be hard to create/add a rules file for that. What's the purpose of the alias? To make it easier to handle both SSD and non-SSD AWS instances?
+2021-09-02 16:04:52 <minimal> tomalok: re secondary IPs, just tested on a VM (using NoCloud) and it works as expected
+2021-09-02 16:06:42 <minimal> IPv6 also works. Just wondering if your are referring to *adding* an IPv6 addr and/or secondary IPv4 to an already configured network interface - hmm, not sure about that
+2021-09-02 16:34:28 <tomalok> yeah, adding/removing secondary IPv4 & IPv6 to existing interface.
+2021-09-02 16:36:06 <tomalok> i think the disk aliasing was to provide some standarized device naming -- something else (i forget what) was confused with /dev/nvme* devices...  this is also oneof the reasons why we use disk labels in /etc/fstab
+2021-09-02 16:36:58 <minimal> tomalok: don't think it will handle that - the network hotplug stuff is designed to handle a new interface being added to a running machine rather than changes to an existing interface - remember most of the cloud-init functionality is only designed for first-time boot
+2021-09-02 16:37:43 <tomalok> the solution we came up was to use a hook on DHCP refresh -- it's not immediate, but it happens eventually
+2021-09-02 16:37:54 <minimal> tomalok: yeah I tend to use labels in general with machines - which is fine until you accidentally have two FSes with clashing labels lol
+2021-09-02 16:42:05 <minimal> tomalok: any idea how other distros handle the adding IPs scenario?
+2021-09-02 16:44:21 <tomalok> i'm not sure -- i may have played with it a little bit with Amazon Linux, but it's been a while since then.  I think they may use a different DHCP client that supports IPv6 better than busybox's, iirc.
+2021-09-02 16:44:51 <minimal> tomalok: I'm using dhcpcd which seems to be the most featurefull client
+2021-09-02 16:45:55 <tomalok> for basic images, we really want to keep stuff as small as possible, of course :)  a few KiB here and there adds up... ;)
+2021-09-02 16:46:55 <minimal> true, but there's also a minimal level of functionality to have as well lol
+2021-09-02 16:48:33 <tomalok> every so often i hear that busybox's ipv6 dhcp client might have improved a little...
+2021-09-02 17:56:55 <minimal> tomalok: https://github.com/aws/amazon-ec2-net-utils is what Amazon Linux uses to manage interfaces. I don't see anything there that dynamically handles the addition of secondary IPs to an already up interface...
+2021-09-02 20:17:36 <tomalok> minimal: maybe that's why they haven't added our Alpine AMIs to the marketplace yet -- they're jealous...  ;P
+2021-09-02 20:18:46 <minimal> tomalok: you've jumped through all their image-related checks ok?
+2021-09-02 20:19:10 <tomalok> mcrute was running with that one
+2021-09-02 20:20:32 <minimal> I find it surprising that AWS can bill basically anyone anywhere in the world in their local currency but if you want to use the Marketplace you must have a US bank account
+2021-09-02 22:09:12 <mcrute> yes I jumped through all the hoops but they take forever
+2021-09-02 22:09:46 <mcrute> I filed it again so we'll see how long it takes, we have an escalation path if needed
+2021-09-02 23:22:54 <minimal> BTW Ariadne: you mentioned in past about wanting cloud image for Linode. Linode apparently have Alpine images available themselves: https://www.linode.com/distributions/
+2021-09-02 23:23:22 <Ariadne> no i doubted us needing to provide images there
+2021-09-02 23:24:16 <minimal> Linode don't support cloud-init anyway, they have their "weird" StackScript stuff instead
+2021-09-02 23:24:29 <Ariadne> i know :)
+2021-09-02 23:24:42 <Ariadne> i have used linode since 2004
+2021-09-02 23:27:06 <minimal> I saw in your blog you got Alpine working on Oracle Cloud - anything unusual about the config there?
+2021-09-02 23:29:50 <Ariadne> not that i know of
+2021-09-02 23:30:43 <minimal> basically just virtio drivers/modules?
+2021-09-02 23:32:56 <Ariadne> yep
+2021-09-02 23:33:01 <Ariadne> they support cloud unit
+2021-09-02 23:33:05 <Ariadne> init*
+2021-09-02 23:33:27 <Ariadne> incidentally what is the progress on doas support for cloud init
+2021-09-02 23:35:45 <tomalok> fwiw, OCI == DayJob™
+2021-09-02 23:36:00 <minimal> Well I've started work on it - actually just about to test it now that I've got the latest cloud-init package out the door. Still dependant/waiting on opendoas to support the /etc/doas.d directory though
+2021-09-02 23:36:42 <tomalok> the alpine-ec2-ami latest edge AMIs set up doas instead of sudo
+2021-09-02 23:43:55 <minimal> tomalok: are you appending stuff in /etc/doas.conf rather than expecting to create a file in /etc/doas.d/ ?
+2021-09-02 23:47:05 <tomalok> yep.  i realize that doas.d is a feature request
+2021-09-03 01:17:55 <Ariadne> tomalok: cool it’d be nice to get oracle images in OCI.  how do we do it?
+2021-09-03 01:18:11 <Ariadne> er alpine :)
+2021-09-03 05:49:08 <tomalok> ariadne: i should be able to hunt down the right folks to talk to.
+2021-09-03 17:39:41 <Ariadne> i have executive contacts there too :P
+2021-09-03 17:44:25 <minimal> Ariadne: was asking yesterday what's the score with https://github.com/Duncaen/OpenDoas/pull/71/ ? 
+2021-09-03 17:44:52 <Ariadne> manpage needs to be written
+2021-09-03 17:44:54 <Ariadne> i hate mdoc
+2021-09-03 17:45:01 <Ariadne> i have acquired alcoholic beverages though
+2021-09-03 17:45:42 <minimal> ok, once that's done and packaged for Alpine I'll be able to properly test the doas support I've written for cloud-init
+2021-09-03 17:47:35 <minimal> as Debian (and I assume Ubuntu) package opendoas then I should be able to get my changes added upstream into cloud-init eventually
+2021-09-03 18:00:05 <Ariadne> minimal: the other open issue is migrating doas.conf to use the configuration directory.
+2021-09-03 18:00:27 <minimal> ah, I thought the 1 issue covered the whole support of the config directory
+2021-09-03 18:00:38 <Ariadne> it does
+2021-09-03 18:00:42 <Ariadne> sub-issue then :P
+2021-09-03 18:01:53 <minimal> ok
+2021-09-03 20:24:58 <Ariadne> minimal: done
+2021-09-03 20:25:10 <Ariadne> minimal: we're just waiting on cloud stuff and maintainer scripts now
+2021-09-03 21:26:12 <minimal> good stuff
+2021-09-03 21:31:37 <tomalok> any particular cloud stuff?
+2021-09-03 21:56:16 <Ariadne> cloud-init using doas :)
+2021-09-03 21:59:05 <tomalok> doas.d/ will also mean some updates to alpine-ec2-ami's edge profile  ;)
+2021-09-04 06:43:03 <Ariadne> oh?
+2021-09-04 15:24:46 <tomalok> nothing too crazy - the setup script will just write to a file in the doas.d/ dir instead of appending doas.conf - same script also sets up sudo (if installed when building the AMI), which probably should also do the same in sudoers.d/
+2021-09-07 14:25:48 <tomalok> hm, doesn't look like https://alpinelinux.org/cloud got updated yet for 3.13.6, 3.12.8, 3.11.12 after the automation failed to do it automatically... ikke ncopa
+2021-09-07 15:10:15 <ncopa> ikke is on vacation. i dont know how to fix it. clandmeter?
+2021-09-08 08:30:15 <clandmeter> interesting, seems the update script is broken
+2021-09-08 08:31:09 <clandmeter> ah its not broken, its stupid, probably made by me.
+2021-09-08 08:34:51 <clandmeter> ah no its ikke :p
+2021-09-08 08:37:33 <clandmeter> tomalok: should be fixed now
+2021-09-08 13:56:14 <tomalok> thanks clandmeter!
+2021-09-08 14:00:59 <minimal> regarding doas support for cloud-init (and I assume for tiny-ec2-bootstrap), a question about the ordering of files in /etc/doas.d/ - for cloud-init I'm copying the way it works for sudo by creating a 90-cloud-init-users.conf file with the various rules from the user-data.yaml. I assume doas will read files in the config directory is filename-order so (in general) how will the order of file processing be managed?
+2021-09-08 14:02:31 <minimal> e.g. I'd expect the "wheel" rule in /etc/doas.d/doas.conf (assuming it is uncommented) to be the first rule in sequence before any other packages' rules but if filename-ordering is used that will not be the case, e.g. any package beginning "a" or "b" placing a file in that directory will be read first
+2021-09-08 14:02:52 <minimal> Ariadne: I guess this is directed to you ^
+2021-09-08 14:28:09 <Ariadne> seems reasonable
+2021-09-08 14:36:39 <minimal> I guess I'm saying shouldn't the default /etc/doas.d/doas.conf file really be named /etc/doas.d/00-baseline.conf or something similar so its read before any other file?
+2021-09-08 14:37:20 <minimal> and that package-supplied doas file be named something like 50-package-name.conf by default
+2021-09-08 17:58:38 <Ariadne> i get what youre saying, but it turns out ordering does not really matter so much
+2021-09-14 22:29:40 <shpoulsen> Hello frends
+2021-09-29 23:26:08 <tomalok> getting closer to an initial reveal of "alpine-cloud-images" -- all steps of the process are now working...  resolving all variant configs, building local images with QEMU, importing remote images, and publishing that image across regions.  Just the AWS plugin is there at the moment, but I'll do OCI next -- after cleanup / some docs...
+2021-09-29 23:26:26 <tomalok> ...and then you all can tell me where I went horribly wrong, and I can go fix things :)
+2021-09-29 23:26:56 <tomalok> mcrute ^^
+```
+
+Below I will write my assessment of the conversation:
+

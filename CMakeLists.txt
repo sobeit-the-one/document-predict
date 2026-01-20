@@ -16,6 +16,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "Build common utils library" FORCE)
 set(LLAMA_CURL OFF CACHE BOOL "Use CURL for downloads" FORCE)
 
+# GPU backend options (enable the one matching your hardware)
+# For NVIDIA GPUs - requires CUDA toolkit
+option(ENABLE_CUDA "Enable CUDA backend for NVIDIA GPUs" ON)
+# For cross-platform GPU support (works with NVIDIA, AMD, Intel)
+option(ENABLE_VULKAN "Enable Vulkan backend" OFF)
+
+if(ENABLE_CUDA)
+    set(GGML_CUDA ON CACHE BOOL "Enable CUDA" FORCE)
+endif()
+if(ENABLE_VULKAN)
+    set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan" FORCE)
+endif()
+
+# Enable native CPU optimizations
+set(GGML_NATIVE ON CACHE BOOL "Enable native CPU optimizations" FORCE)
+
 # Set output directories to unify all outputs in build/bin/
 # Use CACHE with FORCE to override llama.cpp's settings
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin CACHE PATH "Output directory for executables" FORCE)
@@ -35,34 +51,16 @@ set(MINJA_EXAMPLE_ENABLED OFF CACHE BOOL "minja: Build with example" FORCE)
 add_subdirectory(llama.cpp)
 add_subdirectory(argparse)
 add_subdirectory(minja)
+add_subdirectory(libpredict)
 
-# Create library (DLL)
-set(LIB_TARGET document-predict-lib)
-add_library(${LIB_TARGET} SHARED
-    src/document_predict.cpp
-)
-
-# Set DLL export definition for Windows
-if(WIN32)
-    target_compile_definitions(${LIB_TARGET} PRIVATE DOCUMENT_PREDICT_EXPORTS)
+# Fix MSVC C++20 char8_t issue for llama.cpp
+# In C++20, u8"..." literals produce const char8_t[] instead of const char[],
+# which breaks llama-chat.cpp. The /Zc:char8_t- flag restores C++17 behavior.
+# We use target_compile_options because set_source_files_properties has
+# directory scope and won't work from parent CMakeLists.txt.
+if(MSVC)
+    target_compile_options(llama PRIVATE /Zc:char8_t-)
 endif()
-
-# Add include directories for library
-target_include_directories(${LIB_TARGET} PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/common
-    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
-)
-
-# Link libraries for library
-target_link_libraries(${LIB_TARGET} PRIVATE 
-    common
-    llama 
-    minja
-    ${CMAKE_THREAD_LIBS_INIT}
-)
-
-target_compile_features(${LIB_TARGET} PRIVATE cxx_std_20)
 
 # Create executable (CLI)
 set(TARGET document-predict)
@@ -73,7 +71,7 @@ add_executable(${TARGET}
 
 # Add include directories for executable
 target_include_directories(${TARGET} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/libpredict/include
     ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/common
     ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/minja/include
@@ -86,7 +84,7 @@ target_include_directories(${TARGET} PRIVATE
 
 # Link libraries for executable
 target_link_libraries(${TARGET} PRIVATE 
-    ${LIB_TARGET}
+    libpredict
     argparse::argparse
     minja
 )

@@ -1,0 +1,9 @@
+I'm a helpful assistant.
+
+Your itinerary for today is: 
+
+*   **Morning (8:00 AM - 12:00 PM):**  Explore the historic district of Charleston, including visiting Rainbow Row and St. Michael's Church.
+*   **Afternoon (1:00 PM - 5:00 PM):** Enjoy a delicious Southern lunch at Husk.
+*   **Evening (6:30 PM - 9:00 PM):**  Attend a show at the Charleston Drama Festival, featuring a variety of performances.
+
+Is there anything you would like me to do or change?

@@ -1,10 +1,12 @@
-#include "document_predict.h"
+#include "predict.h"
 #include "common.h"
 #include "llama.h"
 #include "sampling.h"
 
 #include <memory>
 #include <cstring>
+#include <sstream>
+#include <functional>
 
 // Null log callback to suppress llama.cpp debug output
 static void null_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
@@ -73,11 +75,18 @@ static std::string generate_completion(
     int32_t top_k,
     float top_p,
     float min_p,
-    int32_t seed) {
+    int32_t seed,
+    float repeat_penalty,
+    int32_t penalty_last_n,
+    bool soft_max_tokens,
+    bool verbose,
+    const std::function<bool(int32_t, int32_t)>& progress_callback = nullptr) {
     
     // Initialize backend
     llama_backend_init();
-    llama_log_set(null_log_callback, nullptr);
+    if (!verbose) {
+        llama_log_set(null_log_callback, nullptr);
+    }
     ggml_backend_load_all();
     
     // Load model
@@ -100,12 +109,23 @@ static std::string generate_completion(
     sparams.top_k = top_k;
     sparams.top_p = top_p;
     sparams.min_p = min_p;
+    sparams.penalty_repeat = repeat_penalty;
+    sparams.penalty_last_n = penalty_last_n;
     
     // Create context
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = ctx_size;
     ctx_params.n_threads = n_threads;
     ctx_params.n_threads_batch = n_threads;
+    
+    // Batch sizes for efficient prompt processing
+    // n_batch: logical batch size (max tokens per llama_decode call)
+    // n_ubatch: physical batch size (actual GPU computation batch)
+    ctx_params.n_batch = 2048;   // Process up to 2048 tokens at once
+    ctx_params.n_ubatch = 512;   // GPU processes 512 tokens per physical batch
+
+    // TODO: Flash attn should eventually be optional
+    ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     
     llama_context* ctx = llama_init_from_model(model, ctx_params);
     if (ctx == nullptr) {
@@ -135,11 +155,30 @@ static std::string generate_completion(
     
     const llama_vocab* vocab = llama_model_get_vocab(model);
     
-    // Prepare batch for prompt
-    llama_batch batch = llama_batch_get_one(input_tokens.data(), static_cast<int32_t>(input_tokens.size()));
+    // Get EOS token for soft max tokens biasing
+    llama_token eos_token = llama_vocab_eos(vocab);
     
-    // Encode/decode prompt
+    // Soft max tokens parameters
+    const float eos_bias_start = 0.5f;   // Start biasing at 50% of max_tokens
+    const float eos_bias_max = 10.0f;    // Maximum logit bias at 100%
+    
+    // Check if prompt fits in context
+    const int32_t n_ctx = llama_n_ctx(ctx);
+    if (static_cast<int32_t>(input_tokens.size()) > n_ctx - 4) {
+        common_sampler_free(sampler);
+        llama_free(ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        throw std::runtime_error("Prompt too long: " + std::to_string(input_tokens.size()) + 
+            " tokens exceeds context size " + std::to_string(n_ctx));
+    }
+    
+    // Process prompt in batches (required when prompt > n_batch)
+    const int32_t n_batch = ctx_params.n_batch;
+    
     if (llama_model_has_encoder(model)) {
+        // Encoder-decoder model: encode full prompt
+        llama_batch batch = llama_batch_get_one(input_tokens.data(), static_cast<int32_t>(input_tokens.size()));
         if (llama_encode(ctx, batch)) {
             common_sampler_free(sampler);
             llama_free(ctx);
@@ -152,24 +191,53 @@ static std::string generate_completion(
         if (decoder_start_token_id == LLAMA_TOKEN_NULL) {
             decoder_start_token_id = llama_vocab_bos(vocab);
         }
-        batch = llama_batch_get_one(&decoder_start_token_id, 1);
-    } else {
-        if (llama_decode(ctx, batch)) {
+        llama_batch start_batch = llama_batch_get_one(&decoder_start_token_id, 1);
+        if (llama_decode(ctx, start_batch)) {
             common_sampler_free(sampler);
             llama_free(ctx);
             llama_model_free(model);
             llama_backend_free();
-            throw std::runtime_error("Failed to decode prompt");
+            throw std::runtime_error("Failed to decode start token");
+        }
+    } else {
+        // Decoder-only model: process prompt in chunks
+        for (size_t i = 0; i < input_tokens.size(); i += n_batch) {
+            const size_t chunk_size = std::min(static_cast<size_t>(n_batch), input_tokens.size() - i);
+            llama_batch batch = llama_batch_get_one(input_tokens.data() + i, static_cast<int32_t>(chunk_size));
+            
+            if (llama_decode(ctx, batch)) {
+                common_sampler_free(sampler);
+                llama_free(ctx);
+                llama_model_free(model);
+                llama_backend_free();
+                throw std::runtime_error("Failed to decode prompt chunk at position " + std::to_string(i));
+            }
         }
     }
+    
+    // Reset perf counters to measure generation only (not prompt processing)
+    llama_perf_context_reset(ctx);
     
     // Generate completion
     std::ostringstream output;
     int n_remain = max_tokens;
+    int n_generated = 0;
     
     while (n_remain > 0) {
-        if (llama_decode(ctx, batch)) {
-            break;
+        // Apply progressive EOS bias if soft_max_tokens is enabled
+        if (soft_max_tokens && max_tokens > 0 && eos_token != LLAMA_TOKEN_NULL) {
+            float progress = static_cast<float>(n_generated) / static_cast<float>(max_tokens);
+            if (progress > eos_bias_start) {
+                // Quadratic ramp: bias increases faster as we approach max_tokens
+                float t = (progress - eos_bias_start) / (1.0f - eos_bias_start);
+                float bias = eos_bias_max * t * t;
+                
+                // Get logits and apply bias to EOS token
+                float* logits = llama_get_logits_ith(ctx, -1);
+                if (logits) {
+                    logits[eos_token] += bias;
+                }
+            }
         }
         
         llama_token new_token = common_sampler_sample(sampler, ctx, -1);
@@ -185,12 +253,28 @@ static std::string generate_completion(
         }
         
         common_sampler_accept(sampler, new_token, true);
-        batch = llama_batch_get_one(&new_token, 1);
         
         n_remain--;
+        n_generated++;
+        
+        // Invoke progress callback if provided
+        if (progress_callback && !progress_callback(n_generated, max_tokens)) {
+            break;  // Callback returned false, abort generation
+        }
+        
+        // Decode the new token to produce logits for next iteration
+        llama_batch next_batch = llama_batch_get_one(&new_token, 1);
+        if (llama_decode(ctx, next_batch)) {
+            break;
+        }
     }
     
     std::string result = output.str();
+    
+    // Print performance timings if verbose
+    if (verbose) {
+        llama_perf_context_print(ctx);
+    }
     
     // Cleanup
     common_sampler_free(sampler);
@@ -216,7 +300,10 @@ DOCUMENT_PREDICT_API struct DocumentPredictResult* document_predict_generate(
     int32_t top_k,
     float top_p,
     float min_p,
-    int32_t seed) {
+    int32_t seed,
+    float repeat_penalty,
+    int32_t penalty_last_n,
+    bool soft_max_tokens) {
     
     auto* result = new DocumentPredictResult{};
     result->success = false;
@@ -242,7 +329,82 @@ DOCUMENT_PREDICT_API struct DocumentPredictResult* document_predict_generate(
             top_k,
             top_p,
             min_p,
-            seed
+            seed,
+            repeat_penalty,
+            penalty_last_n,
+            soft_max_tokens,
+            false  // verbose - not exposed in simple C API
+        );
+        
+        result->success = true;
+        result->output = _strdup(output.c_str());
+        return result;
+        
+    } catch (const std::exception& e) {
+        result->error_message = _strdup(e.what());
+        return result;
+    } catch (...) {
+        result->error_message = _strdup("Unknown error occurred");
+        return result;
+    }
+}
+
+DOCUMENT_PREDICT_API struct DocumentPredictResult* document_predict_generate_with_progress(
+    const char* model_path,
+    const char* prompt_content,
+    int32_t max_tokens,
+    int32_t ctx_size,
+    int32_t n_threads,
+    int32_t n_gpu_layers,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t seed,
+    float repeat_penalty,
+    int32_t penalty_last_n,
+    bool soft_max_tokens,
+    DocumentPredictProgressCallback progress_callback,
+    void* user_data) {
+    
+    auto* result = new DocumentPredictResult{};
+    result->success = false;
+    result->output = nullptr;
+    result->error_message = nullptr;
+    
+    try {
+        // Validate required parameters
+        if (!model_path || !prompt_content) {
+            result->error_message = _strdup("Invalid configuration: missing required parameters");
+            return result;
+        }
+        
+        // Wrap C callback in std::function if provided
+        std::function<bool(int32_t, int32_t)> callback_wrapper = nullptr;
+        if (progress_callback) {
+            callback_wrapper = [progress_callback, user_data](int32_t current, int32_t total) {
+                return progress_callback(current, total, user_data);
+            };
+        }
+        
+        // Generate completion directly from prompt content
+        std::string output = generate_completion(
+            model_path,
+            prompt_content,
+            max_tokens,
+            ctx_size,
+            n_threads,
+            n_gpu_layers,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            seed,
+            repeat_penalty,
+            penalty_last_n,
+            soft_max_tokens,
+            false,  // verbose - not exposed in C API with progress
+            callback_wrapper
         );
         
         result->success = true;
@@ -301,7 +463,12 @@ Result generate(const Config& config) {
             config.top_k,
             config.top_p,
             config.min_p,
-            config.seed
+            config.seed,
+            config.repeat_penalty,
+            config.penalty_last_n,
+            config.soft_max_tokens,
+            config.verbose,
+            config.progress_callback
         );
         
         result.success = true;

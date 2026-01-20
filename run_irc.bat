@@ -1,0 +1,1 @@
+build\bin\document-predict.exe -s 42 -m examples\gemma-3-1B-it-QAT-Q4_0.gguf -f examples\irc-chat\input.txt -o examples\irc-chat\output.txt -ngl -1 -c 8192 -n 8192 --soft-max-tokens --progress

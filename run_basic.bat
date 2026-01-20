@@ -1,0 +1,1 @@
+build\bin\document-predict.exe -s 42 -m examples\gemma-3-1B-it-QAT-Q4_0.gguf -f examples\basic\input.txt -o examples\basic\output.txt -ngl -1 -n 128 --progress

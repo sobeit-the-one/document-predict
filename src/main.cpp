@@ -1,11 +1,79 @@
 #include "argparse/argparse.hpp"
-#include "document_predict.h"
+#include "predict.h"
 #include "prompt_file.hpp"
 
+#include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
+
+// Simple tqdm-style progress bar for manual updates
+// (tqdm.cpp is iterator-based, so we create a simple wrapper for callback use)
+class ProgressBar {
+public:
+    ProgressBar(size_t total, const std::string& desc = "", const std::string& unit = "tok")
+        : total_(total), current_(0), desc_(desc), unit_(unit), 
+          start_time_(std::chrono::steady_clock::now()) {}
+    
+    void update(size_t current) {
+        current_ = current;
+        render();
+    }
+    
+    void finish() {
+        current_ = total_;
+        render();
+        fprintf(stderr, "\n");
+    }
+    
+    void clear() {
+        fprintf(stderr, "\r%*s\r", 80, "");
+        fflush(stderr);
+    }
+
+private:
+    void render() {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration<double>(now - start_time_).count();
+        
+        float progress = total_ > 0 ? static_cast<float>(current_) / total_ : 0.0f;
+        int percent = static_cast<int>(progress * 100);
+        
+        // Calculate speed and ETA
+        double speed = elapsed > 0 ? current_ / elapsed : 0;
+        double eta = speed > 0 ? (total_ - current_) / speed : 0;
+        
+        // Build the progress bar (20 chars wide)
+        const int bar_width = 20;
+        int filled = static_cast<int>(progress * bar_width);
+        
+        std::string bar;
+        for (int i = 0; i < bar_width; ++i) {
+            if (i < filled) bar += '#';
+            else bar += ' ';
+        }
+        
+        // Format: desc: 100%|####################| 128/128 [00:05<00:00, 25.6tok/s]
+        fprintf(stderr, "\r%s%3d%%|%s| %zu/%zu [%02d:%02d<%02d:%02d, %.1f%s/s]",
+            desc_.empty() ? "" : (desc_ + ": ").c_str(),
+            percent,
+            bar.c_str(),
+            current_, total_,
+            static_cast<int>(elapsed) / 60, static_cast<int>(elapsed) % 60,
+            static_cast<int>(eta) / 60, static_cast<int>(eta) % 60,
+            speed, unit_.c_str());
+        fflush(stderr);
+    }
+    
+    size_t total_;
+    size_t current_;
+    std::string desc_;
+    std::string unit_;
+    std::chrono::steady_clock::time_point start_time_;
+};
 
 int main(int argc, char** argv) {
     argparse::ArgumentParser program("document-predict");
@@ -77,6 +145,28 @@ int main(int argc, char** argv) {
         .scan<'i', int>()
         .help("RNG seed (default: -1 for random)");
     
+    program.add_argument("--repeat-penalty")
+        .default_value(1.1f)
+        .scan<'g', float>()
+        .help("Repetition penalty (1.0 = disabled, default: 1.1)");
+    
+    program.add_argument("--repeat-last-n")
+        .default_value(64)
+        .scan<'i', int>()
+        .help("Number of tokens to consider for repetition penalty (-1 = context size, default: 64)");
+    
+    program.add_argument("--soft-max-tokens")
+        .flag()
+        .help("Progressively bias toward EOS as generation approaches max-tokens (helps avoid mid-sentence cutoffs)");
+    
+    program.add_argument("--progress")
+        .flag()
+        .help("Show progress bar during token generation");
+    
+    program.add_argument("-v", "--verbose")
+        .flag()
+        .help("Show llama.cpp logging (GPU detection, backend info, warnings)");
+    
     try {
         program.parse_args(argc, argv);
     } catch (const std::runtime_error& err) {
@@ -146,6 +236,11 @@ int main(int argc, char** argv) {
     int top_k = program.get<int>("--top-k");
     float top_p = program.get<float>("--top-p");
     float min_p = program.get<float>("--min-p");
+    float repeat_penalty = program.get<float>("--repeat-penalty");
+    int repeat_last_n = program.get<int>("--repeat-last-n");
+    bool soft_max_tokens = program.get<bool>("--soft-max-tokens");
+    bool show_progress = program.get<bool>("--progress");
+    bool verbose = program.get<bool>("--verbose");
     
     // Use C++ API - DLL only handles LLM inference
     document_predict::Config config;
@@ -160,9 +255,28 @@ int main(int argc, char** argv) {
     config.top_k = top_k;
     config.top_p = top_p;
     config.min_p = min_p;
+    config.repeat_penalty = repeat_penalty;
+    config.penalty_last_n = repeat_last_n;
+    config.soft_max_tokens = soft_max_tokens;
+    config.verbose = verbose;
+    
+    // Set up progress bar if enabled
+    std::unique_ptr<ProgressBar> progress_bar;
+    if (show_progress) {
+        progress_bar = std::make_unique<ProgressBar>(max_tokens, "Generating", "tok");
+        config.progress_callback = [&progress_bar](int32_t current, int32_t total) {
+            progress_bar->update(current);
+            return true;  // Continue generation
+        };
+    }
     
     // Generate prediction using library
     auto result = document_predict::generate(config);
+    
+    // Finish and clear progress bar if it was shown
+    if (progress_bar) {
+        progress_bar->clear();
+    }
     
     if (!result.success) {
         std::cerr << "Error: " << result.error_message << std::endl;
