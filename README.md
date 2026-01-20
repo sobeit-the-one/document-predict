@@ -47,6 +47,7 @@ By showing the input alongside the prediction, we make it clear that the model i
 - CMake 3.23 or higher
 - C++20 compatible compiler
 - Git (for submodules)
+- **For GPU acceleration**: CUDA Toolkit (NVIDIA) or Vulkan SDK
 
 ### Build Steps
 
@@ -55,11 +56,27 @@ By showing the input alongside the prediction, we make it clear that the model i
 git clone --recursive <repository-url>
 cd document-predict-cpp
 
-# Configure and build
+# Configure
 cmake -B build -S .
+
+# Build (IMPORTANT: Use Release mode for performance!)
 cmake --build build --config Release
 
 # Outputs will be in build/bin/
+```
+
+> **Important**: Always build with `--config Release`. Debug builds are 5-10x slower due to disabled optimizations and runtime checks.
+
+### GPU Support
+
+GPU acceleration is enabled by default for NVIDIA GPUs (CUDA). To use a different backend:
+
+```bash
+# For Vulkan (cross-platform: NVIDIA, AMD, Intel)
+cmake -B build -S . -DENABLE_CUDA=OFF -DENABLE_VULKAN=ON
+
+# For CPU only
+cmake -B build -S . -DENABLE_CUDA=OFF
 ```
 
 ### Submodules
@@ -75,14 +92,17 @@ This project uses the following submodules:
 ### Basic Usage
 
 ```bash
-# Simple document prediction (plain text input)
-document-predict.exe -m model.gguf -f input.txt
+# Simple document prediction (plain text input, GPU accelerated)
+document-predict.exe -m model.gguf -f input.txt -ngl -1
 
-# With output file
-document-predict.exe -m model.gguf -f input.txt -o output.txt
+# With output file and progress display
+document-predict.exe -m model.gguf -f input.txt -o output.txt -ngl -1 --progress
+
+# Longer generation with soft max tokens (smoother endings)
+document-predict.exe -m model.gguf -f input.txt -o output.txt -ngl -1 -n 512 --soft-max-tokens
 
 # Using Jinja2 template
-document-predict.exe -m model.gguf -f template.j2 --jinja -o result.txt
+document-predict.exe -m model.gguf -f template.j2 --jinja -o result.txt -ngl -1
 ```
 
 ### Command-Line Arguments
@@ -97,18 +117,23 @@ document-predict.exe -m model.gguf -f template.j2 --jinja -o result.txt
 - `-o, --output`: Path to output file (if not specified, outputs to console)
 - `--jinja`: Enable Jinja2 template processing
 - `--var key=value`: Template variable (can be used multiple times, only used with `--jinja`)
+- `--progress`: Show generation progress
+- `--verbose`: Enable verbose output (model loading info, performance stats)
 
 **Generation Parameters:**
 
 - `-n, --max-tokens`: Maximum tokens to generate (default: 128)
 - `-c, --ctx-size`: Context window size (default: 4096)
 - `-t, --threads`: Number of CPU threads (default: auto-detect)
-- `-ngl, --n-gpu-layers`: GPU layers to offload (default: 0, use -1 for auto)
+- `-ngl, --n-gpu-layers`: GPU layers to offload (default: 0, use -1 for all)
 - `--temperature`: Sampling temperature (default: from GGUF or 0.8)
 - `--top-k`: Top-k sampling (default: from GGUF or 40)
 - `--top-p`: Top-p sampling (default: from GGUF or 0.9)
 - `--min-p`: Min-p sampling (default: from GGUF or 0.05)
 - `-s, --seed`: RNG seed (default: -1 for random)
+- `--repeat-penalty`: Repetition penalty (default: from GGUF or 1.0)
+- `--penalty-last-n`: Tokens to consider for penalty (default: from GGUF or 64)
+- `--soft-max-tokens`: Gradually bias toward EOS as max tokens approaches (smoother endings)
 
 ### Examples
 
@@ -123,7 +148,7 @@ The history of artificial intelligence began in the 1950s when researchers first
 **Command:**
 
 ```bash
-document-predict.exe -m llama-3.1-8b.gguf -f input.txt -o output.txt -n 256
+document-predict.exe -m llama-3.1-8b.gguf -f input.txt -o output.txt -n 256 -ngl -1
 ```
 
 **output.txt:**
@@ -185,9 +210,10 @@ Multiple variables can be passed using multiple `--var` arguments.
 ### C API (Rust FFI Compatible)
 
 ```c
+// Basic generation
 struct DocumentPredictResult* document_predict_generate(
     const char* model_path,
-    const char* prompt_content,  // Already formatted prompt
+    const char* prompt_content,
     int32_t max_tokens,
     int32_t ctx_size,
     int32_t n_threads,
@@ -196,7 +222,32 @@ struct DocumentPredictResult* document_predict_generate(
     int32_t top_k,
     float top_p,
     float min_p,
-    int32_t seed
+    int32_t seed,
+    float repeat_penalty,
+    int32_t penalty_last_n,
+    bool soft_max_tokens
+);
+
+// Generation with progress callback
+typedef bool (*DocumentPredictProgressCallback)(int32_t current, int32_t total, void* user_data);
+
+struct DocumentPredictResult* document_predict_generate_with_progress(
+    const char* model_path,
+    const char* prompt_content,
+    int32_t max_tokens,
+    int32_t ctx_size,
+    int32_t n_threads,
+    int32_t n_gpu_layers,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t seed,
+    float repeat_penalty,
+    int32_t penalty_last_n,
+    bool soft_max_tokens,
+    DocumentPredictProgressCallback progress_callback,
+    void* user_data
 );
 
 void document_predict_free_result(struct DocumentPredictResult* result);
@@ -211,7 +262,24 @@ namespace document_predict {
         std::string prompt_content;
         int32_t max_tokens = 128;
         int32_t ctx_size = 4096;
-        // ... other parameters
+        int32_t n_threads = 0;  // 0 = auto-detect
+        int32_t n_gpu_layers = 0;
+        float temperature = 0.8f;
+        int32_t top_k = 40;
+        float top_p = 0.9f;
+        float min_p = 0.05f;
+        int32_t seed = -1;
+        float repeat_penalty = 1.0f;
+        int32_t penalty_last_n = 64;
+        bool soft_max_tokens = false;
+        bool verbose = false;
+        std::function<bool(int32_t, int32_t)> progress_callback = nullptr;
+    };
+    
+    struct Result {
+        bool success;
+        std::string output;
+        std::string error_message;
     };
     
     Result generate(const Config& config);
@@ -225,13 +293,15 @@ namespace document_predict {
 1. **CLI (`document-predict.exe`)**: Command-line interface that handles:
    - File I/O
    - Jinja2 template rendering (if enabled)
+   - Progress display
    - Calls the library for inference
 
-2. **Library (`document-predict-lib.dll`)**: Core inference engine that:
-   - Loads GGUF models
-   - Manages context and sampling
-   - Performs token prediction
-   - Returns predictions
+2. **Library (`libpredict.dll`)**: Core inference engine that:
+   - Loads GGUF models via llama.cpp
+   - Manages context, batching, and sampling
+   - Handles GPU offloading and Flash Attention
+   - Performs token prediction with configurable parameters
+   - Supports progress callbacks for long-running generations
 
 ### Design Philosophy
 
@@ -265,9 +335,15 @@ Default parameters are read from GGUF metadata when available, with command-line
 
 GPU acceleration is supported via layer offloading:
 
-- Set `--n-gpu-layers` to offload layers to GPU
-- Use `-1` for automatic detection
-- Uses CUDA, Metal, or other backends supported by `llama.cpp`
+- Set `-ngl` / `--n-gpu-layers` to offload layers to GPU
+- Use `-1` to offload all layers to GPU (recommended)
+- Supports CUDA (NVIDIA), Vulkan (cross-platform), Metal (macOS), and other backends via `llama.cpp`
+
+**Performance features:**
+
+- Flash Attention enabled by default for faster inference
+- Configurable batch sizes for efficient prompt processing
+- Native CPU optimizations when GPU not available
 
 ## Why "Document Prediction" Not "Generation"
 
